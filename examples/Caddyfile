@@ -1,0 +1,34 @@
+{
+	debug
+	admin off
+    https_port 8443
+
+	servers :60943 {
+		protocols h1
+	}
+}
+
+localhost:8443 {
+    encode gzip
+
+
+    root {$CADDY_WWW_ROOT}
+
+    reverse_proxy /pjs/* http://localhost:60943
+
+    file_server / {
+		index index.html
+	}
+}
+
+# currently github.com/gorilla/websocket not support HTTP/2 so
+http://localhost:60943 {
+
+	route /pjs/* {
+		peerjs_server {
+			path /pjs/
+			alive_timeout	60s
+			allow_discovery
+		}
+	}
+}

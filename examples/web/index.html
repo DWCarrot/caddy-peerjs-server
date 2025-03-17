@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>PeerJS Test</title>
+    </head>
+
+    <body>
+        <h1>PeerJS Test</h1>
+        <div>
+            <div>
+                <input type="text" id="peer-key" placeholder="Peer Key" value="peerjs" />
+                <input type="text" id="peer-id-self" placeholder="Peer ID" value="" />
+                <button id="create">Create</button>
+            </div>
+            <div>
+                <input type="text" id="peer-id-remote" placeholder="Peer ID" value="" />
+                <button id="connect">Connect</button>
+            </div>
+            <div>
+                <button id="disconnect">Disconnect</button>
+            </div>
+        </div>
+        <div>
+            <textarea id="data-input">
+
+            </textarea>
+            <button id="send">Send</button>
+        </div>
+        <div>
+            <textarea id="data-output">
+
+            </textarea>
+        </div>
+        <div>
+            <div id="log-display"></div>
+        </div>
+        
+        <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+        <script>
+            function main() {
+                // Cache DOM elements
+                const peerKeyInput = document.getElementById("peer-key");
+                const peerIdSelfInput = document.getElementById("peer-id-self");
+                const createButton = document.getElementById("create");
+                const peerIdRemoteInput = document.getElementById("peer-id-remote");
+                const connectButton = document.getElementById("connect");
+                const disconnectButton = document.getElementById("disconnect");
+                const dataInput = document.getElementById("data-input");
+                const sendButton = document.getElementById("send");
+                const dataOutput = document.getElementById("data-output");
+                const logDisplay = document.getElementById("log-display");
+                const logCache = [];
+
+                function divlog(message) {
+                    logCache.push(message);
+                    if (logCache.length > 10) {
+                        logCache.shift();
+                    }
+                    logDisplay.innerText = logCache.join("\n");
+                }
+
+                let peer = null;
+                let conn = null;
+
+                // Create Peer
+                createButton.addEventListener("click", () => {
+                    const peerKey = peerKeyInput.value;
+                    const peerIdSelf = peerIdSelfInput.value;
+
+                    // Initialize peer with provided ID and API key
+                    peer = new Peer(peerIdSelf || null, {
+                        key: peerKey,
+                        host: location.hostname,
+                        port: location.port,
+                        pingInterval: 10000,
+                        path: "/pjs",
+                        secure: location.protocol === "https:",
+                        config: {
+                            iceServers: [
+                                { urls: "stun:stun.miwifi.com" },
+                                { urls: "stun:stun.l.google.com:19302" },
+                            ],
+                            sdpSemantics: "unified-plan"
+                        },
+                        debug: 3
+                    });
+
+                    // Display the assigned peer ID
+                    peer.on("open", (id) => {
+                        peerIdSelfInput.value = id;
+                        divlog("Peer created with ID: " + id);
+                        console.log("Peer created with ID:", id);
+                    });
+
+                    // Handle incoming connections
+                    peer.on("connection", (incomingConn) => {
+                        conn = incomingConn;
+                        divlog("Incoming connection from remote peer: " + conn.peer);
+                        setupConnectionHandlers();
+                    });
+
+                    // Handle errors
+                    peer.on("error", (err) => {
+                        divlog(err);
+                        console.error(err);
+                    });
+                });
+
+                // Connect to Remote Peer
+                connectButton.addEventListener("click", () => {
+                    const peerIdRemote = peerIdRemoteInput.value;
+
+                    if (!peer) {
+                        alert("Please create a peer first.");
+                        return;
+                    }
+
+                    // Connect to the remote peer
+                    conn = peer.connect(peerIdRemote, {
+                        reliable: true,
+                        constraints: {
+                            offerToReceiveAudio: true,
+                        }
+                    });
+                    divlog("Connecting to remote peer..." + peerIdRemote);
+
+                    // Setup connection handlers
+                    setupConnectionHandlers();
+                });
+
+                // Disconnect
+                disconnectButton.addEventListener("click", () => {
+                    if (conn) {
+                        conn.close();
+                        conn = null;
+                        divlog("Disconnected from peer.");
+                        console.log("Disconnected from peer.");
+                    }
+                });
+
+                // Send Message
+                sendButton.addEventListener("click", () => {
+                    const message = dataInput.value;
+
+                    if (conn && conn.open) {
+                        conn.send(message);
+                        console.log("Sent:", message);
+                    } else {
+                        alert("No open connection to send message.");
+                    }
+                });
+
+                // Setup connection handlers
+                function setupConnectionHandlers() {
+                    if (conn) {
+                        conn.on("open", () => {
+                            divlog("Connection opened: " + conn.label);
+                            console.log("Connection opened.");
+                        });
+
+                        conn.on("data", (data) => {
+                            dataOutput.value += data + "\n";
+                            console.log("Received:", data);
+                        });
+
+                        conn.on("close", () => {
+                            divlog("Connection closed: " + conn.label);
+                            console.log("Connection closed.");
+                        });
+
+                        conn.on("error", (err) => {
+                            divlog(err);
+                            console.error(err);
+                        });
+                    }
+                }
+
+                divlog("Ready!");
+            }
+
+            main();
+        </script>
+    </body>
+</html>
