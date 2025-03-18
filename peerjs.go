@@ -2,64 +2,26 @@ package caddy_peerjs_server
 
 import (
 	"encoding/json"
-	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/DWCarrot/caddy-peerjs-server/pkg/clients"
+	peerjs_server "github.com/DWCarrot/caddy-peerjs-server/pkg"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/idprovider"
-	messagestorage "github.com/DWCarrot/caddy-peerjs-server/pkg/msgstorage"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/protocol"
-	"github.com/DWCarrot/caddy-peerjs-server/pkg/utils"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
-type sctMsgTuple struct {
-	Inner  *protocol.Message
-	Expire time.Time
-}
-
-// GetExpireTime implements messagestorage.IMessage.
-func (s *sctMsgTuple) GetExpireTime() time.Time {
-	return s.Expire
-}
-
-// GetSource implements messagestorage.IMessage.
-func (s *sctMsgTuple) GetSource() string {
-	return s.Inner.Src
-}
-
-// GetTarget implements messagestorage.IMessage.
-func (s *sctMsgTuple) GetTarget() string {
-	return s.Inner.Dst
-}
-
-func transformToMessage(msg messagestorage.IMessage) *protocol.Message {
-	return msg.(*sctMsgTuple).Inner
-}
-
-func transformToExpire(msg messagestorage.IMessage) *protocol.Message {
-	return &protocol.Message{
-		Type: protocol.EXPIRE,
-		Src:  msg.GetTarget(),
-		Dst:  msg.GetSource(),
-	}
-}
-
 const WS_PATH string = "peerjs"
-const ENABLE_TRACE bool = true
+const ENABLE_TRACE bool = false
 
 func init() {
 	caddy.RegisterModule(PeerJSServer{})
 }
-
-type MessageHandler func(msg *protocol.Message, self *PeerJSServer, shouldExit *bool) error
 
 type PeerJSServer struct {
 
@@ -98,12 +60,10 @@ type PeerJSServer struct {
 	// [Additional] Allow to use GET /id http API method to get a new id
 	ClientIdManagerRaw json.RawMessage `json:"client_id_manager,omitempty" caddy:"namespace=http.handlers.peerjs_server inline_key=id_manager"`
 
-	expireTicker *time.Ticker
-	clientIdPvd  idprovider.IClientIdProvider
-	msgHandlers  map[string]MessageHandler
-	clients      *clients.ClientManager
-	storage      *messagestorage.MessageStorage
-	logger       *zap.Logger
+	instance        *peerjs_server.PeerJSServerInstance
+	stopExpireCheck func()
+	clientIdPvd     idprovider.IClientIdProvider
+	logger          *zap.Logger
 }
 
 func (PeerJSServer) CaddyModule() caddy.ModuleInfo {
@@ -125,10 +85,10 @@ func (pjs *PeerJSServer) FillDefault() error {
 		pjs.Key = "peerjs"
 	}
 	if pjs.ExpireTimeout == 0 {
-		pjs.ExpireTimeout = 5000
+		pjs.ExpireTimeout = 5000 * time.Millisecond
 	}
 	if pjs.AliveTimeout == 0 {
-		pjs.AliveTimeout = 60000
+		pjs.AliveTimeout = 60000 * time.Millisecond
 	}
 	if pjs.ConcurrentLimit == 0 {
 		pjs.ConcurrentLimit = 64
@@ -150,25 +110,40 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 	// initialize client id provider
 	pjs.clientIdPvd = &idprovider.DefaultClientIdProvider{}
 	// initialize message handlers
-	pjs.msgHandlers = make(map[string]MessageHandler)
-	pjs.msgHandlers[string(protocol.LEAVE)] = doTransmit
-	pjs.msgHandlers[string(protocol.CANDIDATE)] = doTransmit
-	pjs.msgHandlers[string(protocol.OFFER)] = doTransmit
-	pjs.msgHandlers[string(protocol.ANSWER)] = doTransmit
-	pjs.msgHandlers[string(protocol.EXPIRE)] = doTransmit
+	msgHandlers := make(map[string]peerjs_server.MessageHandler)
+	msgHandlers[string(protocol.LEAVE)] = peerjs_server.DoTransmit
+	msgHandlers[string(protocol.CANDIDATE)] = peerjs_server.DoTransmit
+	msgHandlers[string(protocol.OFFER)] = peerjs_server.DoTransmit
+	msgHandlers[string(protocol.ANSWER)] = peerjs_server.DoTransmit
+	msgHandlers[string(protocol.EXPIRE)] = peerjs_server.DoTransmit
 	if pjs.TransmissionExtend != nil {
 		for _, t := range pjs.TransmissionExtend {
-			pjs.msgHandlers[t] = doTransmit
+			msgHandlers[t] = peerjs_server.DoTransmit
 		}
 	}
-	pjs.msgHandlers[string(protocol.HEARTBEAT)] = doHeartbeatRecord
+	msgHandlers[string(protocol.HEARTBEAT)] = peerjs_server.HandleHeartbeat
 	// initialize storage
-	pjs.storage = messagestorage.NewMessageStorage(pjs.QueueLimit)
-	// initialize client manager
-	pjs.clients = clients.NewClientManager(pjs.ConcurrentLimit)
+	var vd idprovider.IClientIdValidator
+	vd, ok := pjs.clientIdPvd.(idprovider.IClientIdValidator)
+	if !ok {
+		vd = nil
+	}
+	pjs.instance = peerjs_server.NewInstance(
+		pjs.ExpireTimeout,
+		pjs.AliveTimeout,
+		vd,
+		msgHandlers,
+		pjs.ConcurrentLimit,
+		pjs.QueueLimit,
+		pjs.logger,
+	)
 	// initialize ticker
-	pjs.expireTicker = time.NewTicker(pjs.ExpireTimeout)
-	go pjs.loopMessageExpireCheck()
+	loop, cancel, err := pjs.instance.ExpireCheck()
+	if err != nil {
+		return err
+	}
+	pjs.stopExpireCheck = cancel
+	go loop()
 
 	pjs.logger.Info("PeerJS server started up")
 	return nil
@@ -176,9 +151,8 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 
 // Cleanup implements caddy.CleanerUpper.
 func (pjs *PeerJSServer) Cleanup() error {
-	pjs.clients.Clear()
-	pjs.storage.Clear()
-	pjs.expireTicker.Stop()
+	pjs.stopExpireCheck()
+	pjs.instance.Clear()
 	pjs.logger.Info("PeerJS server cleaned up")
 	return nil
 }
@@ -290,7 +264,7 @@ func (pjs *PeerJSServer) handleGetPeers(w http.ResponseWriter, req *http.Request
 		w.WriteHeader(http.StatusForbidden)
 		return nil
 	}
-	peers := pjs.clients.ListClients()
+	peers := pjs.instance.ListPeers()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	return json.NewEncoder(w).Encode(peers)
@@ -314,194 +288,28 @@ func (pjs *PeerJSServer) handleWS(w http.ResponseWriter, req *http.Request) erro
 		return nil
 	}
 
-	client, err := pjs.startSession(id, token, w, req)
-	if err != nil {
-		pjs.logger.Error("Failed to start session", zap.String("id", id), zap.Error(err))
-		return nil
-	}
-	if client == nil {
-		return nil
-	}
-	defer pjs.endSession(client)
-
-	go pjs.loopMessagePumb(client, id)
-
-	ok, err := pjs.clients.SendToClient(id, protocol.BuildOpen(id))
-	if err != nil {
-		pjs.logger.Error("Failed to send OPEN message", zap.String("id", id), zap.Error(err))
-		return nil
-	}
-	if !ok {
-		pjs.logger.Warn("Failed to send OPEN message", zap.String("id", id))
-		return nil
-	}
-
-	messages, err := pjs.storage.Take(id)
-	if err != nil {
-		pjs.logger.Error("Failed to take messages from storage", zap.String("id", id), zap.Error(err))
-	} else {
-		transformed := &utils.IteratorTransform[messagestorage.IMessage, *protocol.Message]{
-			Inner:     messages,
-			Transform: transformToMessage,
-		}
-		ok, err := pjs.clients.SendToClientBatch(id, transformed)
-		if err != nil {
-			pjs.logger.Error("Failed to send messages to client", zap.String("id", id), zap.Error(err))
-		}
-		if !ok {
-			pjs.logger.Warn("Failed to send messages to client", zap.String("id", id))
-			return nil
-		}
-	}
-
-	var message *protocol.Message = nil
-	var shouldExit bool = false
-	for message, err = client.ReadMessage(pjs.AliveTimeout); err == nil && !shouldExit; message, err = client.ReadMessage(pjs.AliveTimeout) {
-		pjs.traceMessage(message, client.GetId())
-		ty := string(message.Type)
-		handler, exists := pjs.msgHandlers[ty]
-		if !exists {
-			pjs.logger.Warn("Unknown message type", zap.String("id", client.GetId()), zap.String("type", ty))
-			// TODO: Send ERROR message to the sender ?
-			continue
-		}
-
-		err = handler(message, pjs, &shouldExit)
-		if err != nil {
-			pjs.logger.Error("Message handler error", zap.String("id", client.GetId()), zap.Error(err))
-		}
-	}
-	if err != nil {
-		if closeErr, ok := err.(*websocket.CloseError); ok {
-			pjs.logger.Info("Client connection closed", zap.String("id", client.GetId()), zap.Int("code", closeErr.Code), zap.String("reason", closeErr.Text))
-		} else if netErr, ok := err.(net.Error); ok {
-			pjs.logger.Info("Client connection error", zap.String("id", client.GetId()), zap.Error(netErr))
-		} else {
-			pjs.logger.Error("Client message read error", zap.String("id", client.GetId()), zap.Error(err))
-		}
-	}
-	return nil
-}
-
-func (pjs *PeerJSServer) loopMessagePumb(client *clients.Client, id string) {
-	beforeClose := func(id string, conn *websocket.Conn) error {
-		message := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-		err := conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(clients.WriteWait))
-		if err != nil {
-			pjs.logger.Error("Failed to send close message", zap.String("id", id), zap.Error(err))
-		}
-		pjs.logger.Debug("Client message loop closing", zap.String("id", id))
-		return nil
-	}
-	err := client.StartMessageLoop(beforeClose)
-	if err != nil {
-		pjs.logger.Error("Client message loop error", zap.String("id", id), zap.Error(err))
-	}
-}
-
-func (pjs *PeerJSServer) startSession(id string, token string, w http.ResponseWriter, req *http.Request) (*clients.Client, error) {
 	upgrader := websocket.Upgrader{}
 	conn, err := upgrader.Upgrade(w, req, nil)
 	if err != nil {
-		return nil, err
-	}
-	client := clients.NewClient(id, token, conn, pjs.AliveTimeout)
-	err = pjs.clients.AddClient(client)
-	if err != nil {
-		if idTakenErr, ok := err.(*clients.IdTakenError); ok {
-			pjs.logger.Debug("ID taken", zap.String("id", id))
-			_ = idTakenErr
-			msg := protocol.BuildIdTaken(id, token)
-			err = client.SendMessageManually(msg)
-			if err != nil {
-				pjs.logger.Error("Failed to send ID-TAKEN error", zap.String("id", id), zap.Error(err))
-			}
-			return nil, client.CloseManually()
-		}
-		if tooManyClientErr, ok := err.(*clients.TooManyClientsError); ok {
-			pjs.logger.Debug("Too many clients", zap.String("id", id))
-			msg := protocol.BuildError(fmt.Sprintf("Too many clients, limit: %d", tooManyClientErr.Count))
-			err = client.SendMessageManually(msg)
-			if err != nil {
-				pjs.logger.Error("Failed to send client limit error", zap.String("id", id), zap.Error(err))
-			}
-			return nil, client.CloseManually()
-		}
-		pjs.logger.Error("Failed to add client", zap.String("id", id), zap.Error(err))
-		return nil, client.CloseManually()
-	}
-	pjs.logger.Info("Client session started", zap.String("id", id))
-	return client, nil
-}
-
-func (pjs *PeerJSServer) endSession(client *clients.Client) error {
-	pjs.clients.RemoveClient(client)
-	pjs.storage.Drop(client.GetId())
-	pjs.logger.Info("Client session ended", zap.String("id", client.GetId()))
-	return nil
-}
-
-func (pjs *PeerJSServer) doMessageExpireCheck(t time.Time) error {
-	expired, err := pjs.storage.Check(t)
-	if err != nil {
 		return err
 	}
-	if len(expired) == 0 {
+
+	preHandle := func(id string, msg *protocol.Message) error {
+		pjs.traceMessage(msg, id)
 		return nil
 	}
-	transfered := make(map[string]utils.Iterable[*protocol.Message])
-	for k, v := range expired {
-		transfered[k] = &utils.IteratorTransform[messagestorage.IMessage, *protocol.Message]{
-			Inner:     v,
-			Transform: transformToExpire,
-		}
-	}
-	results, err := pjs.clients.SendToMultiClientBatch(transfered)
+
+	inboundLoop, outboundLoop, err := pjs.instance.Session(id, token, conn, preHandle)
 	if err != nil {
 		return err
 	}
-	_ = results
-	return nil
-}
+	if inboundLoop == nil || outboundLoop == nil {
+		return nil
+	}
 
-func (pjs *PeerJSServer) loopMessageExpireCheck() {
-	pjs.logger.Debug("Message expire check loop started")
-	for c := range pjs.expireTicker.C {
-		err := pjs.doMessageExpireCheck(c)
-		if err != nil {
-			pjs.logger.Error("Message expire check error", zap.Error(err))
-		}
-	}
-	pjs.logger.Debug("Message expire check loop stopped")
-}
+	go outboundLoop()
 
-func doTransmit(msg *protocol.Message, pjs *PeerJSServer, shouldExit *bool) error {
-	if msg.Type == protocol.EXPIRE {
-		*shouldExit = true
-	}
-	ok, err := pjs.clients.SendToClient(msg.Dst, msg)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		msgTuple := &sctMsgTuple{
-			Inner:  msg,
-			Expire: time.Now().Add(pjs.ExpireTimeout),
-		}
-		overflown, e := pjs.storage.Store(msgTuple)
-		if e != nil {
-			return e
-		}
-		if overflownMsg, ok := overflown.(*sctMsgTuple); ok {
-			// TODO: Send EXPIRE message to the sender ?
-			_ = overflownMsg
-		}
-	}
-	return nil
-}
-
-func doHeartbeatRecord(msg *protocol.Message, pjs *PeerJSServer, shouldExit *bool) error {
-	return nil
+	return inboundLoop()
 }
 
 // Interface guards
@@ -510,6 +318,4 @@ var (
 	_ caddy.CleanerUpper          = (*PeerJSServer)(nil)
 	_ caddy.Validator             = (*PeerJSServer)(nil)
 	_ caddyhttp.MiddlewareHandler = (*PeerJSServer)(nil)
-
-	_ messagestorage.IMessage = (*sctMsgTuple)(nil)
 )

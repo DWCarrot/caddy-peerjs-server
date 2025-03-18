@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 type MessageType string
@@ -57,3 +58,15 @@ func BuildOpen(id string) *Message {
 		Type: OPEN,
 	}
 }
+
+type UnknownMessageError struct {
+	Type string
+}
+
+func (e UnknownMessageError) Error() string {
+	return fmt.Sprintf("UnknownMessageError{ Type: %s }", e.Type)
+}
+
+var (
+	_ error = (*UnknownMessageError)(nil)
+)

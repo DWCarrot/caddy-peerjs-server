@@ -3,7 +3,6 @@ package clients
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/protocol"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/utils"
@@ -59,7 +58,6 @@ func (cm *ClientManager) AddClient(c *Client) error {
 		}
 		// If valid, replace the client with the new one
 		close(existingClient.closeSig)
-		c.lastActive = time.Now()
 		c.closeSig = make(chan struct{})
 		c.msgChan = existingClient.msgChan
 		cm.clients[c.id] = c
@@ -68,7 +66,6 @@ func (cm *ClientManager) AddClient(c *Client) error {
 		if cm.MaxClients > 0 && uint(len(cm.clients)) >= cm.MaxClients {
 			return &TooManyClientsError{Count: cm.MaxClients}
 		}
-		c.lastActive = time.Now()
 		c.closeSig = make(chan struct{})
 		c.msgChan = make(chan OneOrMoreMsg)
 		cm.clients[c.id] = c

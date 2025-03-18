@@ -17,25 +17,23 @@ const WriteWait = time.Second
 
 // Client represents a connected client.
 type Client struct {
-	id         string            // Unique client ID
-	token      string            // Token provided by client
-	conn       *websocket.Conn   // WebSocket connection for the client
-	lastActive time.Time         // Time of last activity (for timeout checks)
-	closeSig   chan struct{}     // Channel for signal of close
-	msgChan    chan OneOrMoreMsg // Channel for message
+	id       string            // Unique client ID
+	token    string            // Token provided by client
+	conn     *websocket.Conn   // WebSocket connection for the client
+	closeSig chan struct{}     // Channel for signal of close
+	msgChan  chan OneOrMoreMsg // Channel for message
 }
 
 // NewClient creates a new client with the given ID, token, and WebSocket connection.
-func NewClient(id string, token string, conn *websocket.Conn, aliveTimeout time.Duration) *Client {
+func NewClient(id string, token string, conn *websocket.Conn) *Client {
 	// handleClose := conn.CloseHandler()
 	// handlePing := conn.PingHandler()
 	client := &Client{
-		id:         id,
-		token:      token,
-		conn:       conn,
-		lastActive: time.Time{},
-		closeSig:   nil,
-		msgChan:    nil,
+		id:       id,
+		token:    token,
+		conn:     conn,
+		closeSig: nil,
+		msgChan:  nil,
 	}
 	// handleCloseNew := func(code int, text string) error {
 	// 	err := handleClose(code, text)
@@ -54,7 +52,6 @@ func NewClient(id string, token string, conn *websocket.Conn, aliveTimeout time.
 	// 	return client.conn.SetReadDeadline(client.lastActive.Add(client.AliveTimeout))
 	// }
 	// conn.SetPingHandler(handlePingNew)
-	conn.SetReadDeadline(time.Now().Add(aliveTimeout))
 	return client
 }
 
@@ -64,10 +61,6 @@ func (c *Client) GetId() string {
 
 func (c *Client) GetToken() string {
 	return c.token
-}
-
-func (c *Client) GetLastActive() time.Time {
-	return c.lastActive
 }
 
 type BeforeCloseCallback func(id string, conn *websocket.Conn) error
@@ -111,16 +104,18 @@ func (c *Client) StartMessageLoop(onClose BeforeCloseCallback) error {
 	}
 }
 
-func (c *Client) ReadMessage(activeTimeout time.Duration) (*protocol.Message, error) {
+func (c *Client) ReadMessage() (*protocol.Message, error) {
 	var msg protocol.Message
 	err := c.conn.ReadJSON(&msg)
 	if err != nil {
 		return nil, err
 	}
-	c.lastActive = time.Now()
-	c.conn.SetReadDeadline(c.lastActive.Add(activeTimeout))
 	msg.Src = c.id
 	return &msg, nil
+}
+
+func (c *Client) UpdateTimeout(deadline time.Time) error {
+	return c.conn.SetReadDeadline(deadline)
 }
 
 func (c *Client) SendMessageManually(msg *protocol.Message) error {

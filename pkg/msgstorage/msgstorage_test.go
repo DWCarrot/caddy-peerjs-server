@@ -1,4 +1,4 @@
-package messagestorage
+package msgstorage
 
 import (
 	"testing"
