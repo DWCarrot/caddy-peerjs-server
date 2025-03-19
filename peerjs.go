@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	peerjs_server "github.com/DWCarrot/caddy-peerjs-server/pkg"
+	signaling "github.com/DWCarrot/caddy-peerjs-server/pkg"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/idprovider"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/msgstorage"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/protocol"
@@ -19,7 +19,7 @@ import (
 )
 
 const WS_PATH string = "peerjs"
-const ENABLE_TRACE bool = true
+const ENABLE_TRACE bool = false
 
 func init() {
 	caddy.RegisterModule(PeerJSServer{})
@@ -62,7 +62,7 @@ type PeerJSServer struct {
 	// [Additional] Allow to use GET /id http API method to get a new id
 	ClientIdManagerRaw json.RawMessage `json:"client_id_manager,omitempty" caddy:"namespace=http.handlers.peerjs_server inline_key=id_manager"`
 
-	instance     *peerjs_server.PeerJSServerInstance
+	instance     *signaling.PeerJSServerInstance
 	expireTicker *time.Ticker
 	clientIdPvd  idprovider.IClientIdProvider
 	logger       *zap.Logger
@@ -112,25 +112,25 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 	// initialize client id provider
 	pjs.clientIdPvd = &idprovider.DefaultClientIdProvider{}
 	// initialize message handlers
-	msgHandlers := make(map[string]peerjs_server.MessageHandler)
-	msgHandlers[string(protocol.LEAVE)] = peerjs_server.DoTransmit
-	msgHandlers[string(protocol.CANDIDATE)] = peerjs_server.DoTransmit
-	msgHandlers[string(protocol.OFFER)] = peerjs_server.DoTransmit
-	msgHandlers[string(protocol.ANSWER)] = peerjs_server.DoTransmit
-	msgHandlers[string(protocol.EXPIRE)] = peerjs_server.DoTransmit
+	msgHandlers := make(map[string]signaling.MessageHandler)
+	msgHandlers[string(protocol.LEAVE)] = signaling.DoTransmit
+	msgHandlers[string(protocol.CANDIDATE)] = signaling.DoTransmit
+	msgHandlers[string(protocol.OFFER)] = signaling.DoTransmit
+	msgHandlers[string(protocol.ANSWER)] = signaling.DoTransmit
+	msgHandlers[string(protocol.EXPIRE)] = signaling.DoTransmit
 	if pjs.TransmissionExtend != nil {
 		for _, t := range pjs.TransmissionExtend {
-			msgHandlers[t] = peerjs_server.DoTransmit
+			msgHandlers[t] = signaling.DoTransmit
 		}
 	}
-	msgHandlers[string(protocol.HEARTBEAT)] = peerjs_server.HandleHeartbeat
+	msgHandlers[string(protocol.HEARTBEAT)] = signaling.HandleHeartbeat
 	// initialize storage
 	var vd idprovider.IClientIdValidator
 	vd, ok := pjs.clientIdPvd.(idprovider.IClientIdValidator)
 	if !ok {
 		vd = nil
 	}
-	pjs.instance = peerjs_server.NewInstance(
+	pjs.instance = signaling.NewInstance(
 		pjs.ExpireTimeout,
 		pjs.AliveTimeout,
 		vd,
@@ -378,5 +378,5 @@ var (
 	_ caddy.Validator             = (*PeerJSServer)(nil)
 	_ caddyhttp.MiddlewareHandler = (*PeerJSServer)(nil)
 
-	_ peerjs_server.IFunctionalLogger = (*ZapLoggerWrapper)(nil)
+	_ signaling.IFunctionalLogger = (*ZapLoggerWrapper)(nil)
 )

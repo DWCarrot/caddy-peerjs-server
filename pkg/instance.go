@@ -1,4 +1,4 @@
-package peerjs_server
+package signaling
 
 import (
 	"fmt"
