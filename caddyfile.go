@@ -16,12 +16,13 @@ func init() {
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 //
 //	peerjs_server [<matcher>] {
-//		[key <string>] // Default: "peerjs"
-//		[expire_timeout <duration>] // Default: 5000
-//		[alive_timeout <duration>] // Default: 60000
-//		[concurrent_limit <uint>] // Default: 64
-//		[queue_limit <uint>] // Default: 16
-//		[allow_discovery [<bool>]] // Default: false
+//		[path <string>]
+//		[key <string>]
+//		[expire_timeout <duration>]
+//		[alive_timeout <duration>]
+//		[concurrent_limit <uint>]
+//		[queue_limit <uint>]
+//		[allow_discovery [<bool>]]
 //		[transmission_extend <string>...]
 //		[id_manager <subdirective>]
 //	}

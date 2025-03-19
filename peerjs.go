@@ -9,7 +9,9 @@ import (
 
 	peerjs_server "github.com/DWCarrot/caddy-peerjs-server/pkg"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/idprovider"
+	"github.com/DWCarrot/caddy-peerjs-server/pkg/msgstorage"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/protocol"
+	"github.com/DWCarrot/caddy-peerjs-server/pkg/utils"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
@@ -17,7 +19,7 @@ import (
 )
 
 const WS_PATH string = "peerjs"
-const ENABLE_TRACE bool = false
+const ENABLE_TRACE bool = true
 
 func init() {
 	caddy.RegisterModule(PeerJSServer{})
@@ -60,10 +62,10 @@ type PeerJSServer struct {
 	// [Additional] Allow to use GET /id http API method to get a new id
 	ClientIdManagerRaw json.RawMessage `json:"client_id_manager,omitempty" caddy:"namespace=http.handlers.peerjs_server inline_key=id_manager"`
 
-	instance        *peerjs_server.PeerJSServerInstance
-	stopExpireCheck func()
-	clientIdPvd     idprovider.IClientIdProvider
-	logger          *zap.Logger
+	instance     *peerjs_server.PeerJSServerInstance
+	expireTicker *time.Ticker
+	clientIdPvd  idprovider.IClientIdProvider
+	logger       *zap.Logger
 }
 
 func (PeerJSServer) CaddyModule() caddy.ModuleInfo {
@@ -135,15 +137,11 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 		msgHandlers,
 		pjs.ConcurrentLimit,
 		pjs.QueueLimit,
-		pjs.logger,
+		&ZapLoggerWrapper{pjs},
 	)
 	// initialize ticker
-	loop, cancel, err := pjs.instance.ExpireCheck()
-	if err != nil {
-		return err
-	}
-	pjs.stopExpireCheck = cancel
-	go loop()
+	pjs.expireTicker = time.NewTicker(pjs.ExpireTimeout)
+	go pjs.loopExpireCheck()
 
 	pjs.logger.Info("PeerJS server started up")
 	return nil
@@ -151,7 +149,7 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 
 // Cleanup implements caddy.CleanerUpper.
 func (pjs *PeerJSServer) Cleanup() error {
-	pjs.stopExpireCheck()
+	pjs.expireTicker.Stop()
 	pjs.instance.Clear()
 	pjs.logger.Info("PeerJS server cleaned up")
 	return nil
@@ -225,6 +223,17 @@ func (pjs *PeerJSServer) checkPath(path string) (string, bool) {
 	return "", false
 }
 
+func (pjs *PeerJSServer) loopExpireCheck() {
+	pjs.logger.Info("Expire check started")
+	for t := range pjs.expireTicker.C {
+		err0 := pjs.instance.DoExpireCheck(t)
+		if err0 != nil {
+			pjs.logger.Error("Expire check error", zap.Error(err0))
+		}
+	}
+	pjs.logger.Info("Expire check stopped")
+}
+
 type sctServerRootResponse struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -294,22 +303,72 @@ func (pjs *PeerJSServer) handleWS(w http.ResponseWriter, req *http.Request) erro
 		return err
 	}
 
-	preHandle := func(id string, msg *protocol.Message) error {
-		pjs.traceMessage(msg, id)
-		return nil
-	}
-
-	inboundLoop, outboundLoop, err := pjs.instance.Session(id, token, conn, preHandle)
+	client, err := pjs.instance.StartSession(id, token, conn)
 	if err != nil {
 		return err
 	}
-	if inboundLoop == nil || outboundLoop == nil {
+	if client == nil {
 		return nil
 	}
 
-	go outboundLoop()
+	defer pjs.instance.EndSession(client)
 
-	return inboundLoop()
+	go pjs.instance.LoopSessionOutbound(client)
+
+	err = pjs.instance.SendOpen(client)
+	if err != nil {
+		pjs.logger.Error("Failed to send OPEN message", zap.String("id", id), zap.Error(err))
+		return nil
+	}
+
+	err = pjs.instance.SendCachedMessages(client)
+	if err != nil {
+		pjs.logger.Error("Failed to send cached messages", zap.String("id", id), zap.Error(err))
+		return nil
+	}
+
+	return pjs.instance.LoopSessionInbound(client)
+}
+
+type ZapLoggerWrapper struct {
+	pjs *PeerJSServer
+}
+
+// Debug implements peerjs_server.IFunctionalLogger.
+func (z *ZapLoggerWrapper) Debug(msg string, id string) {
+	z.pjs.logger.Debug(msg, zap.String("id", id))
+}
+
+// DebugWithError implements peerjs_server.IFunctionalLogger.
+func (z *ZapLoggerWrapper) DebugWithError(msg string, id string, err error) {
+	z.pjs.logger.Debug(msg, zap.String("id", id), zap.Error(err))
+}
+
+// Error implements peerjs_server.IFunctionalLogger.
+func (z *ZapLoggerWrapper) Error(msg string, id string, err error) {
+	z.pjs.logger.Error(msg, zap.String("id", id), zap.Error(err))
+}
+
+// Info implements peerjs_server.IFunctionalLogger.
+func (z *ZapLoggerWrapper) Info(msg string, id string) {
+	z.pjs.logger.Info(msg, zap.String("id", id))
+}
+
+// TraceExpireCheck implements peerjs_server.IFunctionalLogger.
+func (z *ZapLoggerWrapper) TraceExpireCheck(msgs map[string]utils.Iterable[msgstorage.IMessage]) {
+	if ENABLE_TRACE {
+		z.pjs.logger.Debug("Expire check", zap.Int("count", len(msgs)))
+	}
+}
+
+// TraceMessage implements peerjs_server.IFunctionalLogger.
+func (z *ZapLoggerWrapper) TraceMessage(id string, msg *protocol.Message) {
+	z.pjs.traceMessage(msg, id)
+}
+
+// Warn implements peerjs_server.IFunctionalLogger.
+func (z *ZapLoggerWrapper) Warn(msg string, id string, err error) {
+	z.pjs.logger.Warn(msg, zap.String("id", id), zap.Error(err))
 }
 
 // Interface guards
@@ -318,4 +377,6 @@ var (
 	_ caddy.CleanerUpper          = (*PeerJSServer)(nil)
 	_ caddy.Validator             = (*PeerJSServer)(nil)
 	_ caddyhttp.MiddlewareHandler = (*PeerJSServer)(nil)
+
+	_ peerjs_server.IFunctionalLogger = (*ZapLoggerWrapper)(nil)
 )

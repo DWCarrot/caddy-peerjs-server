@@ -52,9 +52,9 @@
                 const logCache = [];
 
                 function divlog(message) {
-                    logCache.push(message);
+                    logCache.splice(0, 0, message);
                     if (logCache.length > 10) {
-                        logCache.shift();
+                        logCache.pop();
                     }
                     logDisplay.innerText = logCache.join("\n");
                 }

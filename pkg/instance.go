@@ -11,7 +11,6 @@ import (
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/protocol"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/utils"
 	"github.com/gorilla/websocket"
-	"go.uber.org/zap"
 )
 
 type sctMsgTuple struct {
@@ -88,6 +87,30 @@ func (e InvalidDestinationError) Error() string {
 	return fmt.Sprintf("InvalidDestinationError{ Dst: %s }", e.Dst)
 }
 
+type IFunctionalLogger interface {
+
+	// TraceMessage logs a message at Trace level
+	TraceMessage(id string, msg *protocol.Message)
+
+	// TraceExpireCheck
+	TraceExpireCheck(map[string]utils.Iterable[msgstorage.IMessage])
+
+	// Debug logs a message at Debug level. id is the client ID, can be empty.
+	Debug(msg string, id string)
+
+	// Debug logs a message at Debug level. id is the client ID, can be empty.
+	DebugWithError(msg string, id string, err error)
+
+	// Info logs a message at Info level. id is the client ID, can be empty.
+	Info(msg string, id string)
+
+	// Warn logs a message at Warn level. id is the client ID, can be empty.
+	Warn(msg string, id string, err error)
+
+	// Error logs a message at Error level. id is the client ID, can be empty.
+	Error(msg string, id string, err error)
+}
+
 type PeerJSServerInstance struct {
 	MsgExpireTimeout  time.Duration
 	ConnExpireTimeout time.Duration
@@ -95,7 +118,7 @@ type PeerJSServerInstance struct {
 	handlers          map[string]MessageHandler
 	clients           *clients.ClientManager
 	storage           *msgstorage.MessageStorage
-	logger            *zap.Logger
+	logger            IFunctionalLogger
 }
 
 func NewInstance(
@@ -105,7 +128,7 @@ func NewInstance(
 	handlers map[string]MessageHandler,
 	maxClients uint,
 	maxMessagesPerClient uint,
-	logger *zap.Logger,
+	logger IFunctionalLogger,
 ) *PeerJSServerInstance {
 	return &PeerJSServerInstance{
 		MsgExpireTimeout:  msgExpireTimeout,
@@ -123,55 +146,49 @@ func (pjs *PeerJSServerInstance) StartSession(id string, token string, conn *web
 	err := pjs.clients.AddClient(client)
 	if err != nil {
 		if idTakenErr, ok := err.(*clients.IdTakenError); ok {
-			pjs.logger.Debug("[PeerJSServerInstance::StartSession] AddClient: ID taken", zap.String("id", id))
+			pjs.logger.Debug("[PeerJSServerInstance::StartSession] AddClient: ID taken", id)
 			_ = idTakenErr
 			msg := protocol.BuildIdTaken(id, token)
 			err = client.SendMessageManually(msg)
 			if err != nil {
-				pjs.logger.Error("Failed to send ID-TAKEN error", zap.String("id", id), zap.Error(err))
+				pjs.logger.Error("Failed to send ID-TAKEN error", id, err)
 			}
 			return nil, client.CloseManually()
 		}
 		if tooManyClientErr, ok := err.(*clients.TooManyClientsError); ok {
-			pjs.logger.Debug("[PeerJSServerInstance::StartSession] AddClient: Too many clients", zap.String("id", id), zap.Uint("limit", tooManyClientErr.Count))
+			pjs.logger.Debug("[PeerJSServerInstance::StartSession] AddClient: Too many clients", id)
 			msg := protocol.BuildError(fmt.Sprintf("Too many clients, limit: %d", tooManyClientErr.Count))
 			err = client.SendMessageManually(msg)
 			if err != nil {
-				pjs.logger.Error("Failed to send client limit error", zap.String("id", id), zap.Error(err))
+				pjs.logger.Error("Failed to send client limit error", id, err)
 			}
 			return nil, client.CloseManually()
 		}
-		pjs.logger.Error("Failed to add client", zap.String("id", id), zap.Error(err))
+		pjs.logger.Error("Failed to add client", id, err)
 		err0 := client.CloseManually()
 		if err0 != nil {
-			pjs.logger.Error("Failed to close client", zap.String("id", id), zap.Error(err0))
+			pjs.logger.Error("Failed to close client", id, err0)
 		}
 		return nil, err
 	}
-	pjs.logger.Info("Client session started", zap.String("id", id))
+	pjs.logger.Info("Client session started", id)
 	return client, nil
 }
 
 func (pjs *PeerJSServerInstance) EndSession(client *clients.Client) error {
 	pjs.clients.RemoveClient(client)
 	pjs.storage.Drop(client.GetId())
-	pjs.logger.Info("Client session ended", zap.String("id", client.GetId()))
+	pjs.logger.Info("Client session ended", client.GetId())
 	return nil
 }
 
-func (pjs *PeerJSServerInstance) DoReceive(client *clients.Client, preHandle func(id string, msg *protocol.Message) error) error {
+func (pjs *PeerJSServerInstance) DoReceive(client *clients.Client) error {
 	msg, err := client.ReadMessage()
 	t := time.Now()
 	if err != nil {
 		return err
 	}
-	id := client.GetId()
-	if preHandle != nil {
-		err = preHandle(id, msg)
-		if err != nil {
-			return err
-		}
-	}
+	pjs.logger.TraceMessage(client.GetId(), msg)
 	if pjs.ClientIdValidator != nil && msg.Dst != "" {
 		valid, err := pjs.ClientIdValidator.ValidateClientId(msg.Dst)
 		if err != nil {
@@ -195,7 +212,7 @@ func (pjs *PeerJSServerInstance) DoExpireCheck(t time.Time) error {
 	if err != nil {
 		return err
 	}
-	pjs.logger.Debug("Expire check", zap.Int("source.count", len(expired)))
+	pjs.logger.TraceExpireCheck(expired)
 	if len(expired) == 0 {
 		return nil
 	}
@@ -234,95 +251,56 @@ func (pjs *PeerJSServerInstance) SendCachedMessages(client *clients.Client) erro
 		return err
 	}
 	if !ok {
-		pjs.logger.Warn("Failed to send messages to client", zap.String("id", id))
+		pjs.logger.Warn("Failed to send messages to client", id, nil)
 		return nil
 	}
 	return nil
 }
 
-func (pjs *PeerJSServerInstance) Session(id string, token string, conn *websocket.Conn, preHandle func(id string, msg *protocol.Message) error) (inboundLoop func() error, outboundLoop func() error, err error) {
-	client, err := pjs.StartSession(id, token, conn)
-	if err != nil {
-		return nil, nil, err
+func (pjs *PeerJSServerInstance) LoopSessionInbound(client *clients.Client) error {
+	for {
+		err := pjs.DoReceive(client)
+		if err != nil {
+			id := client.GetId()
+			if unknownMsgErr, ok := err.(*protocol.UnknownMessageError); ok {
+				pjs.logger.Warn("Unknown message type", id, unknownMsgErr)
+				continue
+			}
+			if invalidDstErr, ok := err.(*InvalidDestinationError); ok {
+				pjs.logger.Warn("Invalid destination", id, invalidDstErr)
+				continue
+			}
+			if wsClose, ok := err.(*websocket.CloseError); ok {
+				pjs.logger.DebugWithError("Client connection closed by websocket", id, wsClose)
+				break
+			}
+			if netErr, ok := err.(net.Error); ok {
+				pjs.logger.DebugWithError("Client connection closed", id, netErr)
+				break
+			}
+			pjs.logger.Error("Failed to handle message", id, err)
+			break
+		}
 	}
-	if client == nil {
-		return nil, nil, nil
-	}
+
+	return nil
+}
+
+func (pjs *PeerJSServerInstance) LoopSessionOutbound(client *clients.Client) error {
 	beforeClose := func(id string, conn *websocket.Conn) error {
 		message := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
 		err0 := conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(clients.WriteWait))
 		if err0 != nil {
-			pjs.logger.Error("Failed to send close message", zap.String("id", id), zap.Error(err0))
+			pjs.logger.Error("Failed to send close message", id, err0)
 		}
-		pjs.logger.Debug("Client message loop closing", zap.String("id", id))
+		pjs.logger.Debug("Client message loop closing", id)
 		return nil
 	}
-	inboundLoop = func() error {
-		defer pjs.EndSession(client)
-
-		err0 := pjs.SendOpen(client)
-		if err0 != nil {
-			pjs.logger.Error("Failed to send OPEN message", zap.String("id", id), zap.Error(err0))
-			return nil
-		}
-
-		err0 = pjs.SendCachedMessages(client)
-		if err0 != nil {
-			pjs.logger.Error("Failed to send cached messages", zap.String("id", id), zap.Error(err0))
-		}
-
-		for {
-			err0 = pjs.DoReceive(client, preHandle)
-			if err0 != nil {
-				if unknownMsgErr, ok := err0.(*protocol.UnknownMessageError); ok {
-					pjs.logger.Warn("Unknown message type", zap.String("id", id), zap.String("type", unknownMsgErr.Type))
-					continue
-				}
-				if invalidDstErr, ok := err0.(*InvalidDestinationError); ok {
-					pjs.logger.Warn("Invalid destination", zap.String("id", id), zap.String("dst", invalidDstErr.Dst))
-					continue
-				}
-				if wsClose, ok := err0.(*websocket.CloseError); ok {
-					pjs.logger.Debug("Client connection closed by websocket", zap.String("id", id), zap.Int("code", wsClose.Code), zap.String("reason", wsClose.Text))
-					break
-				}
-				if netErr, ok := err0.(net.Error); ok {
-					pjs.logger.Debug("Client connection closed", zap.String("id", id), zap.Error(netErr))
-					break
-				}
-				pjs.logger.Error("Failed to handle message", zap.String("id", id), zap.Error(err0))
-				break
-			}
-		}
-
-		return nil
+	err := client.StartMessageLoop(beforeClose)
+	if err != nil {
+		pjs.logger.Error("Client message loop error", client.GetId(), err)
 	}
-	outboundLoop = func() error {
-		err0 := client.StartMessageLoop(beforeClose)
-		if err0 != nil {
-			pjs.logger.Error("Client message loop error", zap.String("id", id), zap.Error(err0))
-		}
-		return nil
-	}
-	return inboundLoop, outboundLoop, nil
-}
-
-func (pjs *PeerJSServerInstance) ExpireCheck() (loop func() error, cancel func(), err error) {
-	ticker := time.NewTicker(pjs.MsgExpireTimeout)
-	loop = func() error {
-		pjs.logger.Info("Expire check started")
-		for t := range ticker.C {
-			err0 := pjs.DoExpireCheck(t)
-			if err0 != nil {
-				pjs.logger.Error("Expire check error", zap.Error(err0))
-			}
-		}
-		return nil
-	}
-	cancel = func() {
-		ticker.Stop()
-	}
-	return loop, cancel, nil
+	return nil
 }
 
 func (pjs *PeerJSServerInstance) Clear() error {
