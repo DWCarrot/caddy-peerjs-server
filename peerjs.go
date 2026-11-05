@@ -298,7 +298,7 @@ func (pjs *PeerJSServer) handleWS(w http.ResponseWriter, req *http.Request) erro
 	}
 
 	upgrader := websocket.Upgrader{}
-	conn, err := upgrader.Upgrade(w, req, nil)
+	conn, err := upgrader.Upgrade(utils.HijackResponseWriter{ResponseWriter: w}, req, nil)
 	if err != nil {
 		return err
 	}

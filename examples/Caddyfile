@@ -2,6 +2,8 @@
 	debug
 	admin off
     https_port 8443
+	local_certs
+    skip_install_trust
 
 	servers :60943 {
 		protocols h1
