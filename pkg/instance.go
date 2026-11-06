@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -208,6 +209,11 @@ func (pjs *PeerJSServerInstance) DoReceive(client *clients.Client) error {
 }
 
 func (pjs *PeerJSServerInstance) DoExpireCheck(t time.Time) error {
+	return pjs.DoExpireCheckContext(context.Background(), t)
+}
+
+// DoExpireCheckContext allows shutdown to interrupt delivery to a blocked client.
+func (pjs *PeerJSServerInstance) DoExpireCheckContext(ctx context.Context, t time.Time) error {
 	expired, err := pjs.storage.Check(t)
 	if err != nil {
 		return err
@@ -223,7 +229,7 @@ func (pjs *PeerJSServerInstance) DoExpireCheck(t time.Time) error {
 			Transform: transformToExpire,
 		}
 	}
-	results, err := pjs.clients.SendToMultiClientBatch(transfered)
+	results, err := pjs.clients.SendToMultiClientBatchContext(ctx, transfered)
 	if err != nil {
 		return err
 	}

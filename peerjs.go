@@ -1,10 +1,13 @@
 package caddy_peerjs_server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	signaling "github.com/DWCarrot/caddy-peerjs-server/pkg"
@@ -22,7 +25,7 @@ const WS_PATH string = "peerjs"
 const ENABLE_TRACE bool = false
 
 func init() {
-	caddy.RegisterModule(PeerJSServer{})
+	caddy.RegisterModule(&PeerJSServer{})
 }
 
 type PeerJSServer struct {
@@ -59,16 +62,19 @@ type PeerJSServer struct {
 	// [Additional] Other MesseageType (`type`) in protocol.Message that allowed to be transmitted
 	TransmissionExtend []string `json:"transmission_extend,omitempty"`
 
-	// [Additional] Allow to use GET /id http API method to get a new id
+	// Reserved for future custom ID managers; non-null configuration is rejected.
 	ClientIdManagerRaw json.RawMessage `json:"client_id_manager,omitempty" caddy:"namespace=http.handlers.peerjs_server inline_key=id_manager"`
 
 	instance     *signaling.PeerJSServerInstance
 	expireTicker *time.Ticker
 	clientIdPvd  idprovider.IClientIdProvider
 	logger       *zap.Logger
+	cancelExpire context.CancelFunc
+	expireDone   chan struct{}
+	cleanupOnce  sync.Once
 }
 
-func (PeerJSServer) CaddyModule() caddy.ModuleInfo {
+func (*PeerJSServer) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID: "http.handlers.peerjs_server",
 		New: func() caddy.Module {
@@ -108,6 +114,10 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 		return err
 	}
 
+	// Caddy calls Validate after Provision, so check before allocating resources.
+	if err := pjs.Validate(); err != nil {
+		return err
+	}
 	pjs.logger = ctx.Logger()
 	// initialize client id provider
 	pjs.clientIdPvd = &idprovider.DefaultClientIdProvider{}
@@ -141,7 +151,10 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 	)
 	// initialize ticker
 	pjs.expireTicker = time.NewTicker(pjs.ExpireTimeout)
-	go pjs.loopExpireCheck()
+	workerCtx, cancel := context.WithCancel(ctx)
+	pjs.cancelExpire = cancel
+	pjs.expireDone = make(chan struct{})
+	go pjs.loopExpireCheck(workerCtx)
 
 	pjs.logger.Info("PeerJS server started up")
 	return nil
@@ -149,14 +162,32 @@ func (pjs *PeerJSServer) Provision(ctx caddy.Context) error {
 
 // Cleanup implements caddy.CleanerUpper.
 func (pjs *PeerJSServer) Cleanup() error {
-	pjs.expireTicker.Stop()
-	pjs.instance.Clear()
-	pjs.logger.Info("PeerJS server cleaned up")
+	pjs.cleanupOnce.Do(func() {
+		if pjs.cancelExpire != nil {
+			pjs.cancelExpire()
+			<-pjs.expireDone
+		}
+		if pjs.instance != nil {
+			pjs.instance.Clear()
+		}
+		if pjs.logger != nil {
+			pjs.logger.Info("PeerJS server cleaned up")
+		}
+	})
 	return nil
 }
 
 // Validate implements caddy.Validator.
 func (pjs *PeerJSServer) Validate() error {
+	if pjs.ExpireTimeout <= 0 || pjs.AliveTimeout <= 0 {
+		return fmt.Errorf("expire_timeout and alive_timeout must be positive")
+	}
+	if !strings.HasPrefix(pjs.Path, "/") {
+		return fmt.Errorf("path must start with /")
+	}
+	if len(pjs.ClientIdManagerRaw) > 0 && strings.TrimSpace(string(pjs.ClientIdManagerRaw)) != "null" {
+		return fmt.Errorf("client_id_manager is not supported")
+	}
 	return nil
 }
 
@@ -223,15 +254,19 @@ func (pjs *PeerJSServer) checkPath(path string) (string, bool) {
 	return "", false
 }
 
-func (pjs *PeerJSServer) loopExpireCheck() {
-	pjs.logger.Info("Expire check started")
-	for t := range pjs.expireTicker.C {
-		err0 := pjs.instance.DoExpireCheck(t)
-		if err0 != nil {
-			pjs.logger.Error("Expire check error", zap.Error(err0))
+func (pjs *PeerJSServer) loopExpireCheck(ctx context.Context) {
+	defer close(pjs.expireDone)
+	defer pjs.expireTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-pjs.expireTicker.C:
+			if err := pjs.instance.DoExpireCheckContext(ctx, t); err != nil && ctx.Err() == nil {
+				pjs.logger.Error("Expire check error", zap.Error(err))
+			}
 		}
 	}
-	pjs.logger.Info("Expire check stopped")
 }
 
 type sctServerRootResponse struct {

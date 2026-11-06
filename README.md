@@ -24,6 +24,16 @@ peerjs_server [<matcher>] {
 
 These params are defined like this, mostly the same as [peerjs/peerjs-server](https://github.com/peers/peerjs-server?tab=readme-ov-file#config--cli-options)
 
+Scalar options accept exactly one argument, except `allow_discovery`, which can
+also appear without an argument. `transmission_extend` requires at least one
+message type. Unknown options, excess arguments, and nested option blocks are
+rejected. Custom `id_manager` / JSON `client_id_manager` configuration is not
+implemented and is rejected rather than silently ignored (JSON `null` is allowed).
+
+Timeouts must be positive after defaults are applied; zero selects the default.
+Paths must start with `/`. Each configuration instance owns its expiration worker;
+cleanup cancels and waits for that worker before clearing its signaling state.
+
 | Variable                                     | Type          | Default  | Description                                                  |
 | -------------------------------------------- | ------------- | -------- | ------------------------------------------------------------ |
 | Path<br/>`path`                              | string        | "/"      | The server responds for requests to the root URL + path. Example: Set to /myapp for [http://127.0.0.1:9000/myapp](vscode-file://vscode-app/d:/Storage/Softwares/Microsoft VS Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html) |

@@ -24,14 +24,14 @@ func init() {
 //		[queue_limit <uint>]
 //		[allow_discovery [<bool>]]
 //		[transmission_extend <string>...]
-//		[id_manager <subdirective>]
 //	}
 func (pjs *PeerJSServer) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		if d.NextArg() {
 			return d.ArgErr()
 		}
-		for d.NextBlock(0) {
+		nesting := d.Nesting()
+		for d.NextBlock(nesting) {
 			switch d.Val() {
 			case "path":
 				if !d.NextArg() {
@@ -94,12 +94,20 @@ func (pjs *PeerJSServer) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				for d.NextArg() {
 					data = append(data, d.Val())
 				}
+				if len(data) == 0 {
+					return d.ArgErr()
+				}
 				pjs.TransmissionExtend = data
 			case "id_manager":
-				// TODO: Implement this
-				continue
+				return d.Err("id_manager is not supported")
 			default:
 				return d.Errf("unrecognized subdirective: %s", d.Val())
+			}
+			if d.NextArg() {
+				return d.ArgErr()
+			}
+			if d.NextBlock(nesting + 1) {
+				return d.Err("nested blocks are not supported")
 			}
 		}
 	}

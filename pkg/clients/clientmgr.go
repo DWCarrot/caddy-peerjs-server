@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -110,6 +111,11 @@ func (cm *ClientManager) SendToClientBatch(id string, msg utils.Iterable[*protoc
 }
 
 func (cm *ClientManager) SendToMultiClientBatch(v map[string]utils.Iterable[*protocol.Message]) (map[string]bool, error) {
+	return cm.SendToMultiClientBatchContext(context.Background(), v)
+}
+
+// SendToMultiClientBatchContext releases the read lock when delivery is canceled.
+func (cm *ClientManager) SendToMultiClientBatchContext(ctx context.Context, v map[string]utils.Iterable[*protocol.Message]) (map[string]bool, error) {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
@@ -120,7 +126,11 @@ func (cm *ClientManager) SendToMultiClientBatch(v map[string]utils.Iterable[*pro
 			results[id] = false
 			continue
 		}
-		client.msgChan <- OneOrMoreMsg{One: nil, More: msgs}
+		select {
+		case client.msgChan <- OneOrMoreMsg{One: nil, More: msgs}:
+		case <-ctx.Done():
+			return results, ctx.Err()
+		}
 		results[id] = true
 	}
 	return results, nil

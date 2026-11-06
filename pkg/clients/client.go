@@ -66,6 +66,7 @@ func (c *Client) GetToken() string {
 type BeforeCloseCallback func(id string, conn *websocket.Conn) error
 
 func (c *Client) StartMessageLoop(onClose BeforeCloseCallback) error {
+	defer c.conn.Close()
 	for {
 		select {
 		case <-c.closeSig:
@@ -78,7 +79,10 @@ func (c *Client) StartMessageLoop(onClose BeforeCloseCallback) error {
 			}
 			err = c.conn.Close()
 			return err
-		case msgs := <-c.msgChan:
+		case msgs, ok := <-c.msgChan:
+			if !ok {
+				return nil
+			}
 			if msgs.One != nil {
 				err := c.conn.WriteJSON(*msgs.One)
 				if err != nil {

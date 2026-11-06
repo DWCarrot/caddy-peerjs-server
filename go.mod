@@ -1,6 +1,6 @@
 module github.com/DWCarrot/caddy-peerjs-server
 
-go 1.23.5
+go 1.27.3
 
 require (
 	github.com/caddyserver/caddy/v2 v2.9.1
