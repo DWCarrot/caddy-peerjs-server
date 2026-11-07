@@ -52,4 +52,4 @@ cleanup cancels and waits for that worker before clearing its signaling state.
 
 ### Only support http/1.1
 
-This extension relies on [github.com/gorilla/websocket](https://pkg.go.dev/github.com/gorilla/websocket) , which have no support for http/2 currently.
+This extension uses [github.com/coder/websocket](https://pkg.go.dev/github.com/coder/websocket) v1.8.15 with HTTP/1.1 WebSocket handshakes. Keep the internal HTTP/1.1 listener and reverse-proxy bridge shown in the example; direct HTTP/2 Extended CONNECT is not enabled.

@@ -23,7 +23,7 @@ localhost:8443 {
 	}
 }
 
-# currently github.com/gorilla/websocket not support HTTP/2 so
+# Keep WebSocket handshakes on HTTP/1.1 for coder/websocket.
 http://localhost:60943 {
 
 	route /pjs/* {

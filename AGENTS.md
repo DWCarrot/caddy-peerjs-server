@@ -15,7 +15,7 @@ This is the independent Go repository `github.com/DWCarrot/caddy-peerjs-server`,
 
 ## Build and Development
 
-Use Go 1.23.5 or newer. `go.mod` currently pins Caddy v2.9.1 and Gorilla WebSocket v1.5.3.
+Use Go 1.23.5 or newer. `go.mod` currently pins Caddy v2.9.1 and Coder WebSocket v1.8.15.
 
 - `go mod download`: download module dependencies.
 - `go build ./...`: compile the Go packages.

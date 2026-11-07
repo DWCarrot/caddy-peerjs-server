@@ -12,7 +12,9 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
-	"github.com/gorilla/websocket"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 func TestCaddyfileConfiguration(t *testing.T) {
@@ -160,27 +162,70 @@ func TestCleanupClosesWebSocket(t *testing.T) {
 	}))
 	defer server.Close()
 	defer stop()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/peerjs?key=peerjs&id=test&token=test", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/peerjs?key=peerjs&id=test&token=test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
+	defer conn.CloseNow()
 	var msg struct {
 		Type string `json:"type"`
 	}
-	if err := conn.ReadJSON(&msg); err != nil || msg.Type != "OPEN" {
+	if err := wsjson.Read(ctx, conn, &msg); err != nil || msg.Type != "OPEN" {
 		t.Fatalf("opening connection: %s, %v", msg.Type, err)
 	}
 	stop()
-	if _, _, err := conn.ReadMessage(); err == nil {
+	if _, _, err := conn.Read(ctx); err == nil {
 		t.Fatal("connection remained open")
 	}
 	select {
 	case <-handlerDone:
 	case <-time.After(3 * time.Second):
 		t.Fatal("WebSocket handler did not exit after cleanup")
+	}
+}
+
+func TestPeerJSSignalingRelay(t *testing.T) {
+	p, stop := loadPeer(t, "{}")
+	defer stop()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := p.ServeHTTP(&caddyhttp.ResponseWriterWrapper{ResponseWriter: w}, r, nil); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dial := func(id string) *websocket.Conn {
+		t.Helper()
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/peerjs?key=peerjs&id="+id+"&token=test", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.CloseNow() })
+		var msg map[string]any
+		if err := wsjson.Read(ctx, conn, &msg); err != nil {
+			t.Fatal(err)
+		}
+		if msg["type"] != "OPEN" {
+			t.Fatalf("expected OPEN: %v", msg)
+		}
+		return conn
+	}
+	sender := dial("sender")
+	receiver := dial("receiver")
+	// Exercise a signaling payload larger than Coder's default read limit.
+	payload := strings.Repeat("x", 64*1024)
+	if err := wsjson.Write(ctx, sender, map[string]any{"type": "OFFER", "dst": "receiver", "src": "spoofed", "payload": payload}); err != nil {
+		t.Fatal(err)
+	}
+	receiver.SetReadLimit(-1)
+	var msg map[string]any
+	if err := wsjson.Read(ctx, receiver, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg["type"] != "OFFER" || msg["src"] != "sender" || msg["payload"] != payload {
+		t.Fatal("signaling message was not relayed intact")
 	}
 }

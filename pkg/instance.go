@@ -11,7 +11,7 @@ import (
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/msgstorage"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/protocol"
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/utils"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 type sctMsgTuple struct {
@@ -144,6 +144,7 @@ func NewInstance(
 
 func (pjs *PeerJSServerInstance) StartSession(id string, token string, conn *websocket.Conn) (*clients.Client, error) {
 	client := clients.NewClient(id, token, conn)
+	client.UpdateTimeout(time.Now().Add(pjs.ConnExpireTimeout))
 	err := pjs.clients.AddClient(client)
 	if err != nil {
 		if idTakenErr, ok := err.(*clients.IdTakenError); ok {
@@ -276,8 +277,8 @@ func (pjs *PeerJSServerInstance) LoopSessionInbound(client *clients.Client) erro
 				pjs.logger.Warn("Invalid destination", id, invalidDstErr)
 				continue
 			}
-			if wsClose, ok := err.(*websocket.CloseError); ok {
-				pjs.logger.DebugWithError("Client connection closed by websocket", id, wsClose)
+			if websocket.CloseStatus(err) != -1 {
+				pjs.logger.DebugWithError("Client connection closed by websocket", id, err)
 				break
 			}
 			if netErr, ok := err.(net.Error); ok {
@@ -294,8 +295,7 @@ func (pjs *PeerJSServerInstance) LoopSessionInbound(client *clients.Client) erro
 
 func (pjs *PeerJSServerInstance) LoopSessionOutbound(client *clients.Client) error {
 	beforeClose := func(id string, conn *websocket.Conn) error {
-		message := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-		err0 := conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(clients.WriteWait))
+		err0 := conn.Close(websocket.StatusNormalClosure, "")
 		if err0 != nil {
 			pjs.logger.Error("Failed to send close message", id, err0)
 		}

@@ -17,7 +17,7 @@ import (
 	"github.com/DWCarrot/caddy-peerjs-server/pkg/utils"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 	"go.uber.org/zap"
 )
 
@@ -332,12 +332,12 @@ func (pjs *PeerJSServer) handleWS(w http.ResponseWriter, req *http.Request) erro
 		return nil
 	}
 
-	upgrader := websocket.Upgrader{}
-	conn, err := upgrader.Upgrade(utils.HijackResponseWriter{ResponseWriter: w}, req, nil)
+	conn, err := websocket.Accept(w, req, nil)
 	if err != nil {
 		return err
 	}
 
+	defer conn.CloseNow()
 	client, err := pjs.instance.StartSession(id, token, conn)
 	if err != nil {
 		return err
